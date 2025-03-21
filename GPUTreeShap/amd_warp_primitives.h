@@ -5,14 +5,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_cooperative_groups.h>
 
-#if __AMDGCN_WAVEFRONT_SIZE == 64
-#undef WARP_SIZE
-#define WARP_SIZE 64
-#elif __AMDGCN_WAVEFRONT_SIZE == 32
-#undef WARP_SIZE
-#define WARP_SIZE 32
-#endif
-
 /* this header file provides _*_sync functions, which is not 
  * ROCm official implementation.
  * These functions work with ROCm 5.5+.
@@ -60,21 +52,17 @@ __device__ inline int __thread_rank(lane_mask mask)
 
 __device__ inline unsigned int __mask_size(lane_mask mask)
 {
-#if WARP_SIZE == 64
     return __popcll(mask);
-#else
-    return __popc(mask);
-#endif
 }
 
-__device__ inline int __thread_rank_to_lane_id(lane_mask mask, int i)
+__device__ inline int __thread_rank_to_lane_id(lane_mask mask, int i, int width = warpSize)
 {
     int size = __mask_size(mask);
 
     if (i < 0 || i >= size) return -1;
 
-    return (size == WARP_SIZE) ? i
-        : (WARP_SIZE == 64) ? __fns64(mask, 0, (i + 1))
+    return (size == width) ? i
+        : (width == 64) ? __fns64(mask, 0, (i + 1))
         : __fns32(mask, 0, (i + 1));
 }
 
@@ -135,7 +123,7 @@ __device__ inline lane_mask __ballot_sync(lane_mask mask, int predicate)
 }
 
 template <class T>
-__device__ inline T __shfl_sync(lane_mask mask, T var, int src, int width = WARP_SIZE)
+__device__ inline T __shfl_sync(lane_mask mask, T var, int src, int width = warpSize)
 {
     /* calling thread must be set in the mask */
 #ifndef WARP_NO_MASK_CHECK
@@ -149,7 +137,7 @@ __device__ inline T __shfl_sync(lane_mask mask, T var, int src, int width = WARP
 }
 
 template <class T>
-__device__ inline T __shfl_down_sync(lane_mask mask, T var, unsigned int lane_delta, int width = WARP_SIZE)
+__device__ inline T __shfl_down_sync(lane_mask mask, T var, unsigned int lane_delta, int width = warpSize)
 {
     /* calling thread must be set in the mask */
 #ifndef WARP_NO_MASK_CHECK
@@ -163,7 +151,7 @@ __device__ inline T __shfl_down_sync(lane_mask mask, T var, unsigned int lane_de
 }
 
 template <class T>
-__device__ inline T __shfl_up_sync(lane_mask mask, T var, unsigned int lane_delta, int width = WARP_SIZE)
+__device__ inline T __shfl_up_sync(lane_mask mask, T var, unsigned int lane_delta, int width = warpSize)
 {
     /* calling thread must be set in the mask */
 #ifndef WARP_NO_MASK_CHECK
@@ -177,7 +165,7 @@ __device__ inline T __shfl_up_sync(lane_mask mask, T var, unsigned int lane_delt
 }
 
 template <class T>
-__device__ inline T __shfl_xor_sync(lane_mask mask, T var, int lane_mask, int width = WARP_SIZE)
+__device__ inline T __shfl_xor_sync(lane_mask mask, T var, int lane_mask, int width = warpSize)
 {
     /* calling thread must be set in the mask */
 #ifndef WARP_NO_MASK_CHECK
@@ -208,11 +196,7 @@ __device__ inline lane_mask __match_any_sync(lane_mask mask, T value)
     bmask = __branchmask();
 
     while (1) {
-#if WARP_SIZE == 64
-        int i = __ffsll(bmask) - 1;
-#else
-        int i = __ffs((unsigned int)bmask) - 1;
-#endif
+        int i = __ffsll((unsigned long long)bmask) - 1;
 
         if (i < 0) break;
 
@@ -239,11 +223,7 @@ __device__ inline lane_mask __match_any_sync(lane_mask mask, T value)
 #endif
 
     while (1) {
-#if WARP_SIZE == 64
-        int i = __ffsll(bmask) - 1;
-#else
-        int i = __ffs((unsigned int)bmask) - 1;
-#endif
+        int i = __ffsll((unsigned long long)bmask) - 1;
 
         if (i < 0) break;
 
@@ -331,7 +311,7 @@ struct binop_xor {
 };
 
 template <class T, class BinaryOP>
-__device__ inline T __reduce_impl_sync(lane_mask mask, T var, BinaryOP op)
+__device__ inline T __reduce_impl_sync(lane_mask mask, T var, BinaryOP op, int width = warpSize)
 {
     /* calling thread must be set in the mask */
 #ifndef WARP_NO_MASK_CHECK
@@ -349,7 +329,7 @@ __device__ inline T __reduce_impl_sync(lane_mask mask, T var, BinaryOP op)
     if (size == 1) return var;
 
     /* binary tree alg */
-    if (size == WARP_SIZE) {
+    if (size == width) {
         for (int mask = size / 2; mask > 0; mask /= 2)
             var = op(var, __shfl_xor(var, mask));
         return var;
@@ -359,8 +339,8 @@ __device__ inline T __reduce_impl_sync(lane_mask mask, T var, BinaryOP op)
             /* check src lane */
             src = tid + size / 2;
 
-            lane = (size == WARP_SIZE) ? src
-                : (WARP_SIZE == 64) ? __fns64(mask, 0, (src + 1))
+            lane = (size == width) ? src
+                : (width == 64) ? __fns64(mask, 0, (src + 1))
                 : __fns32(mask, 0, (src + 1));
 
             T tp = __shfl(var, lane);
@@ -375,8 +355,8 @@ __device__ inline T __reduce_impl_sync(lane_mask mask, T var, BinaryOP op)
             size = (size + 1) / 2;
         }
 
-        lane = (size == WARP_SIZE) ? 0
-            : (WARP_SIZE == 64) ? __fns64(mask, 0, 1)
+        lane = (size == width) ? 0
+            : (width == 64) ? __fns64(mask, 0, 1)
             : __fns32(mask, 0, 1);
 
         return __shfl(var, lane);
@@ -390,7 +370,7 @@ __device__ T __reduce_mul_sync(lane_mask mask, T var)
 {
     binop_multiply<T> op;
 
-    return __reduce_impl_sync<T, binop_multiply<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_multiply<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -398,7 +378,7 @@ __device__ T __reduce_add_sync(lane_mask mask, T var)
 {
     binop_add<T> op;
 
-    return __reduce_impl_sync<T, binop_add<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_add<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -406,7 +386,7 @@ __device__ T __reduce_min_sync(lane_mask mask, T var)
 {
     binop_min<T> op;
 
-    return __reduce_impl_sync<T, binop_min<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_min<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -414,7 +394,7 @@ __device__ T __reduce_max_sync(lane_mask mask, T var)
 {
     binop_max<T> op;
 
-    return __reduce_impl_sync<T, binop_max<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_max<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -422,7 +402,7 @@ __device__ T __reduce_and_sync(lane_mask mask, T var)
 {
     binop_and<T> op;
 
-    return __reduce_impl_sync<T, binop_and<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_and<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -430,7 +410,7 @@ __device__ T __reduce_or_sync(lane_mask mask, T var)
 {
     binop_or<T> op;
 
-    return __reduce_impl_sync<T, binop_or<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_or<T>>(mask, var, op, warpSize);
 }
 
 template <typename T>
@@ -438,7 +418,7 @@ __device__ T __reduce_xor_sync(lane_mask mask, T var)
 {
     binop_xor<T> op;
 
-    return __reduce_impl_sync<T, binop_xor<T>>(mask, var, op);
+    return __reduce_impl_sync<T, binop_xor<T>>(mask, var, op, warpSize);
 }
 
 

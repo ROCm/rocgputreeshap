@@ -227,7 +227,6 @@ class ContiguousGroup {
  public:
   __device__ ContiguousGroup(lane_mask mask) : mask_(mask) {}
 
-#if WARP_SIZE == 64
   __device__ uint32_t size() const { return __popcll(mask_); }
   __device__ uint32_t thread_rank() const {
 
@@ -239,7 +238,7 @@ class ContiguousGroup {
   }
   template <typename T>
   __device__ T shfl(T val, uint32_t src) const {
-    return __shfl_sync(mask_, val, src + __ffsll(mask_) - 1);
+    return __shfl_sync(mask_, val, src + __ffsll((unsigned long long) mask_) - 1);
   }
   template <typename T>
   __device__ T shfl_up(T val, uint32_t delta) const {
@@ -250,37 +249,9 @@ class ContiguousGroup {
 #if 1
     return __ballot_sync(mask_, predicate);
 #else  /* wrong due to hardware difference */
-    return __ballot_sync(mask_, predicate) >> (__ffsll(mask_) - 1);
+    return __ballot_sync(mask_, predicate) >> (__ffsll((unsigned long long) mask_) - 1);
 #endif
   }
-
-#elif WARP_SIZE == 32
-  __device__ uint32_t size() const { return __popc(mask_); }
-  __device__ uint32_t thread_rank() const {
-#if 1
-    return __thread_rank(mask_);
-#else /* wrong */
-    return __popc(mask_ & __lanemask_lt());
-#endif
-  }
-  template <typename T>
-  __device__ T shfl(T val, uint32_t src) const {
-    return __shfl_sync(mask_, val, src + __ffs((unsigned int)mask_) - 1);
-  }
-  template <typename T>
-  __device__ T shfl_up(T val, uint32_t delta) const {
-    return __shfl_up_sync(mask_, val, delta);
-  }
-  __device__ lane_mask ballot(int predicate) const {
-
-#if 1
-    return __ballot_sync(mask_, predicate);
-#else  /* wrong due to hardware difference */
-    return __ballot_sync(mask_, predicate) >> (__ffs((unsigned int)mask_) - 1);
-#endif
-  }
-
-#endif
 
   template <typename T, typename OpT>
   __device__ T reduce(T val, OpT op) {
@@ -458,7 +429,7 @@ ConfigureThread(const DatasetT& X, const size_t bins_per_row,
   // Partition work
   // Each warp processes a set of training instances applied to a path
   size_t tid = kBlockSize * blockIdx.x + threadIdx.x;
-  const size_t warp_size = WARP_SIZE;
+  const size_t warp_size = warpSize;
   size_t warp_rank = tid / warp_size;
 
   if (warp_rank >= bins_per_row * DivRoundUp(X.NumRows(), kRowsPerWarp)) {
@@ -485,11 +456,14 @@ ConfigureThread(const DatasetT& X, const size_t bins_per_row,
 
 #define GPUTREESHAP_MAX_THREADS_PER_BLOCK 256
 
-#if WARP_SIZE == 64
-#define FULL_MASK 0xffffffffffffffff
-#elif WARP_SIZE == 32
+// CUDA defines WARP_SIZE
+#if WARP_SIZE == 32
 #define FULL_MASK 0xffffffff
+#else
+#define FULL_MASK (~(lane_mask)0)
 #endif
+
+static int warp_size_hip = 0;
 
 template <typename DatasetT, size_t kBlockSize, size_t kRowsPerWarp,
           typename SplitConditionT>
@@ -524,6 +498,12 @@ __global__ void __launch_bounds__(GPUTREESHAP_MAX_THREADS_PER_BLOCK)
   }
 }
 
+inline void CheckCuda(hipError_t err) {
+  if (err != hipSuccess) {
+    throw thrust::system_error(err, thrust::hip_category());
+  }
+}
+
 template <typename DatasetT, typename SizeTAllocatorT, typename PathAllocatorT,
           typename SplitConditionT>
 void ComputeShap(
@@ -534,6 +514,18 @@ void ComputeShap(
     size_t num_groups, double* phis) {
   size_t bins_per_row = bin_segments.size() - 1;
   const int kBlockThreads = GPUTREESHAP_MAX_THREADS_PER_BLOCK;
+
+  // chck warp size
+  int WARP_SIZE = 0;
+  if (warp_size_hip <= 0) {
+    CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+    if (warp_size_hip <= 0) {
+      printf("failed to detect wavefront size...\n");
+      exit(-1);
+    }
+  }
+  WARP_SIZE = warp_size_hip;
+
   const int warps_per_block = kBlockThreads / WARP_SIZE;
   const int kRowsPerWarp = 1024;
   size_t warps_needed = bins_per_row * DivRoundUp(X.NumRows(), kRowsPerWarp);
@@ -661,6 +653,18 @@ void ComputeShapInteractions(
 {
   size_t bins_per_row = bin_segments.size() - 1;
   const int kBlockThreads = GPUTREESHAP_MAX_THREADS_PER_BLOCK;
+
+  // chck warp size
+  int WARP_SIZE = 0;
+  if (warp_size_hip <= 0) {
+    CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+    if (warp_size_hip <= 0) {
+      printf("failed to detect wavefront size...\n");
+      exit(-1);
+    }
+  }
+  WARP_SIZE = warp_size_hip;
+
   const int warps_per_block = kBlockThreads / WARP_SIZE;
   const int kRowsPerWarp = 100;
   size_t warps_needed = bins_per_row * DivRoundUp(X.NumRows(), kRowsPerWarp);
@@ -746,6 +750,18 @@ void ComputeShapTaylorInteractions(
     size_t num_groups, double* phis) {
   size_t bins_per_row = bin_segments.size() - 1;
   const int kBlockThreads = GPUTREESHAP_MAX_THREADS_PER_BLOCK;
+
+  // chck warp size
+  int WARP_SIZE = 0;
+  if (warp_size_hip <= 0) {
+    CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+    if (warp_size_hip <= 0) {
+      printf("failed to detect wavefront size...\n");
+      exit(-1);
+    }
+  }
+  WARP_SIZE = warp_size_hip;
+
   const int warps_per_block = kBlockThreads / WARP_SIZE;
   const int kRowsPerWarp = 100;
   size_t warps_needed = bins_per_row * DivRoundUp(X.NumRows(), kRowsPerWarp);
@@ -823,13 +839,8 @@ __global__ void __launch_bounds__(GPUTREESHAP_MAX_THREADS_PER_BLOCK)
       /* this part may need to tune in the future
        * as of now, the s and n are smaller than 33 */
 
-#if WARP_SIZE == 64
       uint32_t s = __popcll(x_ballot & ~r_ballot);
       uint32_t n = __popcll(x_ballot ^ r_ballot);
-#elif WARP_SIZE == 32
-      uint32_t s = __popc(x_ballot & ~r_ballot);
-      uint32_t n = __popc(x_ballot ^ r_ballot);
-#endif
 
       float tmp = 0.0f;
 
@@ -871,6 +882,18 @@ void ComputeShapInterventional(
     size_t num_groups, double* phis) {
   size_t bins_per_row = bin_segments.size() - 1;
   const int kBlockThreads = GPUTREESHAP_MAX_THREADS_PER_BLOCK;
+
+  // chck warp size
+  int WARP_SIZE = 0;
+  if (warp_size_hip <= 0) {
+    CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+    if (warp_size_hip <= 0) {
+      printf("failed to detect wavefront size...\n");
+      exit(-1);
+    }
+  }
+  WARP_SIZE = warp_size_hip;
+
   const int warps_per_block = kBlockThreads / WARP_SIZE;
   const int kRowsPerWarp = 100;
   size_t warps_needed = bins_per_row * DivRoundUp(X.NumRows(), kRowsPerWarp);
@@ -916,12 +939,6 @@ struct DeduplicateKeyTransformOp : public thrust::unary_function<const PathEleme
     return {e.path_idx, e.feature_idx};
   }
 };
-
-inline void CheckCuda(hipError_t err) {
-  if (err != hipSuccess) {
-    throw thrust::system_error(err, thrust::hip_category());
-  }
-}
 
 template <typename Return>
 class DiscardOverload : public thrust::discard_iterator<Return> {
@@ -1037,7 +1054,7 @@ struct BFDCompare {
 // Best Fit Decreasing bin packing
 // Efficient O(nlogn) implementation with balanced tree using std::set
 template <typename IntVectorT>
-std::vector<size_t> BFDBinPacking(const IntVectorT& counts, int bin_limit = WARP_SIZE)
+std::vector<size_t> BFDBinPacking(const IntVectorT& counts, int bin_limit)
 {
   thrust::host_vector<int> counts_host(counts);
   std::vector<kv> path_lengths(counts_host.size());
@@ -1083,7 +1100,7 @@ std::vector<size_t> BFDBinPacking(const IntVectorT& counts, int bin_limit = WARP
 // First Fit Decreasing bin packing
 // Inefficient O(n^2) implementation
 template <typename IntVectorT>
-std::vector<size_t> FFDBinPacking(const IntVectorT& counts, int bin_limit = WARP_SIZE)
+std::vector<size_t> FFDBinPacking(const IntVectorT& counts, int bin_limit)
 {
   thrust::host_vector<int> counts_host(counts);
   std::vector<kv> path_lengths(counts_host.size());
@@ -1122,7 +1139,7 @@ std::vector<size_t> FFDBinPacking(const IntVectorT& counts, int bin_limit = WARP
 // Next Fit bin packing
 // O(n) implementation
 template <typename IntVectorT>
-std::vector<size_t> NFBinPacking(const IntVectorT& counts, int bin_limit = WARP_SIZE)
+std::vector<size_t> NFBinPacking(const IntVectorT& counts, int bin_limit)
 {
   thrust::host_vector<int> counts_host(counts);
   std::vector<size_t> bin_map(counts_host.size());
@@ -1163,7 +1180,7 @@ void GetPathLengths(const PathVectorT& device_paths, LengthVectorT* path_lengths
 }
 
 struct PathTooLongOp {
-  __device__ size_t operator()(size_t length) { return length > WARP_SIZE; }
+  __device__ size_t operator()(size_t length) { return length > warpSize; }
 };
 
 template <typename SplitConditionT>
@@ -1186,11 +1203,24 @@ void ValidatePaths(const PathVectorT& device_paths,
                      path_lengths.end(), too_long_op);
 
   if (invalid_length) {
-#if WARP_SIZE == 64
-    throw std::invalid_argument("Tree depth must be < 64");
-#elif WARP_SIZE == 32
-    throw std::invalid_argument("Tree depth must be < 32");
-#endif
+    // chck warp size
+    int WARP_SIZE = 0;
+
+    if (warp_size_hip <= 0) {
+        CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+        if (warp_size_hip <= 0) {
+          printf("failed to detect wavefront size...\n");
+          exit(-1);
+        }
+    }
+    WARP_SIZE = warp_size_hip;
+
+    if (WARP_SIZE == 64) {
+      throw std::invalid_argument("Tree depth must be < 64");
+    }
+    else if (WARP_SIZE == 32) {
+      throw std::invalid_argument("Tree depth must be < 32");
+    }
   }
 
   IncorrectVOp<SplitConditionT> incorrect_v_op{device_paths.data().get()};
@@ -1215,7 +1245,19 @@ void PreprocessPaths(PathVectorT* device_paths, PathVectorT* deduplicated_paths,
   int_vector path_lengths;
   detail::GetPathLengths<DeviceAllocatorT, SplitConditionT>(*deduplicated_paths,
                                                             &path_lengths);
-  SizeVectorT device_bin_map = detail::BFDBinPacking(path_lengths);
+
+  // chck warp size
+  int WARP_SIZE = 0;
+  if (warp_size_hip <= 0) {
+    CheckCuda(hipDeviceGetAttribute(&warp_size_hip, hipDeviceAttributeWarpSize, 0));
+    if (warp_size_hip <= 0) {
+      printf("failed to detect wavefront size...\n");
+      exit(-1);
+    }
+  }
+  WARP_SIZE = warp_size_hip;
+
+  SizeVectorT device_bin_map = detail::BFDBinPacking(path_lengths, WARP_SIZE);
   ValidatePaths<DeviceAllocatorT, SplitConditionT>(*deduplicated_paths,
                                                    path_lengths);
   detail::SortPaths<PathVectorT, SplitConditionT, SizeVectorT,
