@@ -218,22 +218,33 @@ class APITest : public ::testing::Test {
 };
 
 TEST_F(APITest, PathTooLong) {
-#if WARP_SIZE == 64
-  model.resize(65);
-#else
-  model.resize(33);
-#endif
+  // chck warp size
+  int WARP_SIZE = 0;
+
+  hipDeviceGetAttribute(&WARP_SIZE, hipDeviceAttributeWarpSize, 0);
+  if (WARP_SIZE <= 0) {
+    printf("failed to detect wavefront size...\n");
+    exit(-1);
+  }
+
+  if (WARP_SIZE == 64) {
+    model.resize(65);
+  }
+  else {
+    model.resize(33);
+  }
 
   model[0] = {0, -1, 0, {0, 0, 0}, 0, 0};
   for (size_t i = 1; i < model.size(); i++) {
     model[i] = {0, static_cast<int64_t>(i), 0, {0, 0, 0}, 0, 0};
   }
 
-#if WARP_SIZE == 64
-  ExpectAPIThrow<std::invalid_argument>("Tree depth must be < 64");
-#else
-  ExpectAPIThrow<std::invalid_argument>("Tree depth must be < 32");
-#endif
+  if (WARP_SIZE == 64) {
+    ExpectAPIThrow<std::invalid_argument>("Tree depth must be < 64");
+  }
+  else {
+    ExpectAPIThrow<std::invalid_argument>("Tree depth must be < 32");
+  }
 }
 
 TEST_F(APITest, PathVIncorrect) {
